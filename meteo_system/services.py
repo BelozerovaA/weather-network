@@ -1,4 +1,10 @@
-"""Model: бизнес-логика предметной области."""
+"""
+Model: бизнес-логика предметной области.
+
+Сервисы содержат правила и сценарии работы системы.
+Они используют валидаторы, репозитории и вспомогательные классы
+(контроль качества, журнал сбоев), но не знают о View и Controller.
+"""
 from __future__ import annotations
 
 import csv
@@ -20,11 +26,14 @@ from .validators import DeviceValidator, ObservationValidator, StationValidator
 
 
 class StationService:
+    """Регистрация и поиск станций, расчёт соседей для контроля качества."""
+
     def __init__(self, stations: StationRepository):
         self._stations = stations
         self._validator = StationValidator()
 
     def register(self, code, name, latitude, longitude, type_):
+        """Создать станцию после валидации и проверки уникальности кода."""
         station = Station(code, name, latitude, longitude, type_)
         self._validate(station)
         if self._stations.find_by_code(code):
@@ -32,6 +41,7 @@ class StationService:
         return self._stations.add(station)
 
     def update(self, station):
+        """Обновить станцию с повторной валидацией."""
         self._validate(station)
         existing = self._stations.find_by_code(station.code)
         if existing and existing.id != station.id:
@@ -44,9 +54,11 @@ class StationService:
             raise ValueError("; ".join(errors))
 
     def all_active(self):
+        """Вернуть только действующие станции."""
         return [s for s in self._stations.list() if s.status == "активна"]
 
     def neighbors(self, station, radius_km=300.0):
+        """Станции в радиусе radius_km (для сравнения наблюдений)."""
         return [
             other for other in self._stations.list()
             if other.id != station.id
@@ -55,6 +67,7 @@ class StationService:
 
     @staticmethod
     def _distance_km(a, b):
+        """Расстояние по формуле гаверсинуса (км)."""
         r = 6371.0
         lat1, lon1, lat2, lon2 = map(
             math.radians, (a.latitude, a.longitude, b.latitude, b.longitude)
@@ -68,6 +81,8 @@ class StationService:
 
 
 class MalfunctionLog:
+    """Журнал отказов приборов (CSV). Фиксирует сбои и переходы на резерв."""
+
     def __init__(self, path="malfunctions_log.csv"):
         self._path = Path(path)
         if not self._path.exists():
@@ -77,6 +92,7 @@ class MalfunctionLog:
                 )
 
     def record(self, station_id, device_id, event):
+        """Дописать событие в журнал."""
         with self._path.open("a", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
                 datetime.now().isoformat(timespec="seconds"),
@@ -85,12 +101,15 @@ class MalfunctionLog:
 
 
 class DeviceService:
+    """Регистрация приборов, отказ основного → переход на резервный."""
+
     def __init__(self, devices, log):
         self._devices = devices
         self._log = log
         self._validator = DeviceValidator()
 
     def register(self, name, type_, serial_number, station_id):
+        """Зарегистрировать прибор после валидации и проверки серийного номера."""
         device = Device(name, type_, serial_number, station_id)
         self._validate(device)
         if self._devices.find_by_serial(serial_number):
@@ -110,6 +129,10 @@ class DeviceService:
             raise ValueError("; ".join(errors))
 
     def mark_failed(self, device):
+        """
+        Пометить прибор как неисправный и попытаться переключиться
+        на резервный прибор той же станции.
+        """
         device.status = DeviceStatus.FAILED
         self._devices.update(device)
         self._log.record(
@@ -126,12 +149,14 @@ class DeviceService:
         return reserve
 
     def _find_reserve(self, station_id):
+        """Найти резервный прибор на станции."""
         for device in self._devices.list_by_station(station_id):
             if device.status == DeviceStatus.RESERVE:
                 return device
         return None
 
     def due_for_verification(self, within_days=7):
+        """Приборы, у которых срок поверки истекает в ближайшие within_days дней."""
         threshold = (
             datetime.now() + timedelta(days=within_days)
         ).date().isoformat()
@@ -142,10 +167,18 @@ class DeviceService:
 
 
 class TransmissionService:
+    """
+    Передача наблюдений в центр.
+    При недоступности канала данные накапливаются локально (pending)
+    и отправляются позже через flush_pending.
+    Задержка определяется сравнением времени передачи со сроком наблюдения
+    (3 часа для срочных, 6 — для промежуточных).
+    """
+
     def __init__(self, transmissions, observations):
         self._transmissions = transmissions
         self._observations = observations
-        self._pending = []
+        self._pending: List[Observation] = []  # локальный буфер при обрыве связи
 
     def transmit(
         self,
@@ -153,6 +186,10 @@ class TransmissionService:
         channel_available,
         transmission_time=None,
     ):
+        """
+        Передать наблюдение, если канал доступен.
+        Иначе положить в буфер pending.
+        """
         if not channel_available:
             self._pending.append(observation)
             return None
@@ -166,6 +203,7 @@ class TransmissionService:
         )
 
     def flush_pending(self, transmission_time=None):
+        """Отправить все накопленные при обрыве канала наблюдения."""
         when = transmission_time or datetime.now()
         sent = [
             self._send(
@@ -180,11 +218,13 @@ class TransmissionService:
 
     @staticmethod
     def deadline(observation):
+        """Крайний срок передачи = время наблюдения + интервал типа."""
         base = datetime.fromisoformat(observation.observation_time)
         hours = 3 if observation.kind == ObservationKind.URGENT else 6
         return base + timedelta(hours=hours)
 
     def _send(self, observation, is_delayed, transmission_time):
+        """Фактическая запись передачи и смена статуса наблюдения."""
         observation.status = ObservationStatus.TRANSMITTED
         self._observations.update(observation)
         return self._transmissions.add(
@@ -197,6 +237,8 @@ class TransmissionService:
 
 
 class ObservationService:
+    """Создание наблюдений и запуск контроля качества."""
+
     def __init__(self, observations, stations, qc_engine):
         self._observations = observations
         self._stations = stations
@@ -204,6 +246,7 @@ class ObservationService:
         self._validator = ObservationValidator()
 
     def create(self, station, observation_time, kind, parameters):
+        """Создать наблюдение после валидации."""
         observation = Observation(
             station_id=station.id,
             observation_time=observation_time,
@@ -216,6 +259,10 @@ class ObservationService:
         return self._observations.add(observation)
 
     def run_quality_control(self, observation, station):
+        """
+        Проверить наблюдение (диапазоны + сравнение с соседями).
+        При проблемах статус → «на перепроверке», иначе → «принято».
+        """
         neighbor_ids = {
             s.id for s in self._stations.neighbors(station)
         }
@@ -236,11 +283,14 @@ class ObservationService:
 
 
 class VerificationService:
+    """Планирование и завершение поверки приборов."""
+
     def __init__(self, verifications, devices):
         self._verifications = verifications
         self._devices = devices
 
     def schedule(self, device, planned_date):
+        """Запланировать поверку и записать next_verification у прибора."""
         device.next_verification = planned_date
         self._devices.update(device)
         return self._verifications.add(
@@ -248,6 +298,7 @@ class VerificationService:
         )
 
     def complete(self, verification, device, done_date):
+        """Отметить поверку выполненной и обновить даты/статус прибора."""
         verification.status = VerificationStatus.DONE
         self._verifications.update(verification)
         device.last_verification = done_date

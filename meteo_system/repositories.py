@@ -1,4 +1,10 @@
-"""Model: репозитории, инкапсулирующие SQL."""
+"""
+Model: репозитории, инкапсулирующие SQL.
+
+Каждый репозиторий реализует IRepository и скрывает детали SQLite
+от остальной части Model. Все запросы параметризованы
+(защита от SQL-инъекций).
+"""
 from __future__ import annotations
 
 import json
@@ -14,16 +20,22 @@ T = TypeVar("T")
 
 
 class BaseRepository(IRepository[T], Generic[T]):
+    """Общая CRUD-логика. Конкретные репозитории задают table и маппинг."""
+
     table: str = ""
 
     def __init__(self, db: Database):
         self._db = db
 
     @abstractmethod
-    def _row_to_entity(self, row: sqlite3.Row) -> T: ...
+    def _row_to_entity(self, row: sqlite3.Row) -> T:
+        """Преобразовать строку БД в объект предметной области."""
+        ...
 
     @abstractmethod
-    def _entity_to_params(self, entity: T) -> tuple: ...
+    def _entity_to_params(self, entity: T) -> tuple:
+        """Преобразовать объект в кортеж параметров для SQL."""
+        ...
 
     @abstractmethod
     def _insert_sql(self) -> str: ...
@@ -33,7 +45,7 @@ class BaseRepository(IRepository[T], Generic[T]):
 
     def add(self, entity: T) -> T:
         cur = self._db.execute(self._insert_sql(), self._entity_to_params(entity))
-        entity.id = cur.lastrowid
+        entity.id = cur.lastrowid  # type: ignore[attr-defined]
         return entity
 
     def get(self, entity_id: int) -> Optional[T]:
@@ -48,7 +60,8 @@ class BaseRepository(IRepository[T], Generic[T]):
 
     def update(self, entity: T) -> None:
         self._db.execute(
-            self._update_sql(), self._entity_to_params(entity) + (entity.id,)
+            self._update_sql(),
+            self._entity_to_params(entity) + (entity.id,),  # type: ignore[attr-defined]
         )
 
     def delete(self, entity_id: int) -> None:
@@ -81,6 +94,7 @@ class StationRepository(BaseRepository[Station]):
             WHERE id=?"""
 
     def find_by_code(self, code):
+        """Поиск станции по уникальному коду."""
         rows = self._db.query("SELECT * FROM stations WHERE code=?", (code,))
         return self._row_to_entity(rows[0]) if rows else None
 
@@ -113,12 +127,14 @@ class DeviceRepository(BaseRepository[Device]):
             WHERE id=?"""
 
     def list_by_station(self, station_id):
+        """Все приборы, закреплённые за станцией."""
         rows = self._db.query(
             "SELECT * FROM devices WHERE station_id=?", (station_id,)
         )
         return [self._row_to_entity(r) for r in rows]
 
     def find_by_serial(self, serial_number):
+        """Поиск по уникальному серийному номеру."""
         rows = self._db.query(
             "SELECT * FROM devices WHERE serial_number=?", (serial_number,)
         )
@@ -129,6 +145,7 @@ class ObservationRepository(BaseRepository[Observation]):
     table = "observations"
 
     def _row_to_entity(self, row):
+        # parameters хранятся в БД как JSON-строка
         return Observation(
             id=row["id"], station_id=row["station_id"],
             observation_time=row["observation_time"],
@@ -160,6 +177,7 @@ class ObservationRepository(BaseRepository[Observation]):
         return [self._row_to_entity(r) for r in rows]
 
     def list_between(self, start: str, end: str):
+        """Наблюдения в заданном временном диапазоне (ISO-строки)."""
         rows = self._db.query(
             """SELECT * FROM observations
                WHERE observation_time BETWEEN ? AND ?""",

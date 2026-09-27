@@ -1,4 +1,12 @@
-"""Model: отчёты регионального метеоцентра."""
+"""
+Model: отчёты регионального метеоцентра.
+
+Формирует сводки для руководителя:
+  - полнота поступления данных по станциям;
+  - количество выбросов и задержанных передач;
+  - охват приборов поверкой;
+  - плотность наблюдений по географическим районам.
+"""
 from __future__ import annotations
 
 from collections import defaultdict
@@ -9,6 +17,8 @@ from .schedule import ObservationSchedule
 
 
 class ReportService:
+    """Сбор и форматирование отчёта руководителя."""
+
     def __init__(
         self,
         stations,
@@ -24,6 +34,10 @@ class ReportService:
         self._verifications = verifications
 
     def data_completeness(self, start: datetime, end: datetime):
+        """
+        Полнота данных: сколько наблюдений пришло относительно
+        ожидаемого числа сроков (срочные + промежуточные).
+        """
         expected = ObservationSchedule.expected_count(start, end)
         report = {}
 
@@ -38,6 +52,7 @@ class ReportService:
         return report
 
     def outliers_and_delays(self):
+        """Число наблюдений «на перепроверке» и задержанных передач."""
         outliers = sum(
             1 for o in self._observations.list()
             if o.status == ObservationStatus.NEEDS_RECHECK
@@ -49,6 +64,7 @@ class ReportService:
         return {"выбросы": outliers, "задержанные_передачи": delayed}
 
     def verification_coverage(self):
+        """Доля приборов с актуальным сроком поверки."""
         devices = self._devices.list()
         today = datetime.now().date().isoformat()
 
@@ -73,6 +89,7 @@ class ReportService:
         }
 
     def devices_with_expiring_verification(self, within_days=7):
+        """Приборы, у которых поверка истекает в ближайшие дни."""
         from datetime import timedelta
 
         threshold = (
@@ -84,6 +101,10 @@ class ReportService:
         ]
 
     def observation_density_by_region(self, grid_deg=5.0):
+        """
+        Плотность наблюдений по географическим ячейкам
+        (округление координат до grid_deg градусов).
+        """
         density = defaultdict(int)
         station_cell = {}
 
@@ -102,6 +123,7 @@ class ReportService:
         return dict(density)
 
     def full_report(self, start: datetime, end: datetime):
+        """Сводный текстовый отчёт для руководителя."""
         lines = [
             "=== ОТЧЁТ РЕГИОНАЛЬНОГО МЕТЕОЦЕНТРА ===",
             f"Период: {start.isoformat()} — {end.isoformat()}",

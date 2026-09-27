@@ -1,10 +1,23 @@
-"""View: консольное представление."""
+"""
+View: консольное представление.
+
+Отвечает ТОЛЬКО за вывод информации пользователю.
+Никакой бизнес-логики, валидации и обращений к БД здесь быть не должно.
+Все данные приходят уже готовыми от Controller.
+"""
+
+
 class ConsoleView:
-    def header(self, text):
+    """Простейший консольный View для демонстрации MVP."""
+
+    def header(self, text: str) -> None:
+        """Заголовок секции."""
         print(f"\n--- {text} ---")
 
-    def line(self, text):
+    def line(self, text: str) -> None:
+        """Обычная строка вывода."""
         print(text)
 
-    def error(self, text):
+    def error(self, text: str) -> None:
+        """Сообщение об ошибке."""
         print(f"Ошибка: {text}")

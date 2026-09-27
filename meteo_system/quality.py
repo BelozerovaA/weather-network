@@ -1,4 +1,12 @@
-"""Model: контроль качества наблюдений."""
+"""
+Model: контроль качества наблюдений.
+
+Два вида проверок:
+  1. RangeCheck — значение параметра в допустимом физическом диапазоне.
+  2. NeighborDeviationCheck — сильное отклонение от соседних станций.
+
+QualityControlEngine применяет все проверки и возвращает (ok, список_проблем).
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -6,6 +14,8 @@ from typing import Dict, List, Optional, Tuple
 
 from .models import Observation
 
+
+# Допустимые диапазоны метеопараметров (упрощённые учебные значения)
 PARAMETER_RANGES: Dict[str, Tuple[float, float]] = {
     "temperature": (-60.0, 50.0),
     "pressure": (900.0, 1100.0),
@@ -15,18 +25,25 @@ PARAMETER_RANGES: Dict[str, Tuple[float, float]] = {
 
 
 class QualityCheck(ABC):
+    """Базовый интерфейс одной проверки качества."""
+
     @abstractmethod
-    def check(self, observation: Observation, neighbors: List[Observation]) -> List[str]:
+    def check(
+        self, observation: Observation, neighbors: List[Observation]
+    ) -> List[str]:
+        """Вернуть список найденных проблем (пустой = всё в порядке)."""
         ...
 
 
 class RangeCheck(QualityCheck):
+    """Проверка выхода значений за физические диапазоны."""
+
     def check(self, observation, neighbors):
         problems = []
         for name, value in observation.parameters.items():
             bounds = PARAMETER_RANGES.get(name)
             if bounds is None:
-                continue
+                continue  # неизвестный параметр не проверяем
             low, high = bounds
             if not low <= value <= high:
                 problems.append(
@@ -36,6 +53,11 @@ class RangeCheck(QualityCheck):
 
 
 class NeighborDeviationCheck(QualityCheck):
+    """
+    Сравнение с наблюдениями соседних станций в тот же срок.
+    Если отклонение больше max_deviation — считаем выбросом.
+    """
+
     def __init__(self, max_deviation: float = 15.0):
         self._max_deviation = max_deviation
 
@@ -60,10 +82,17 @@ class NeighborDeviationCheck(QualityCheck):
 
 
 class QualityControlEngine:
+    """Запускает набор проверок и агрегирует результаты."""
+
     def __init__(self, checks: Optional[List[QualityCheck]] = None):
+        # По умолчанию — диапазоны + отклонение от соседей
         self._checks = checks or [RangeCheck(), NeighborDeviationCheck()]
 
     def review(self, observation, neighbors):
+        """
+        :return: (ok: bool, problems: list[str])
+                 ok=True, если ни одна проверка не нашла проблем.
+        """
         problems = []
         for check in self._checks:
             problems.extend(check.check(observation, neighbors))

@@ -1,6 +1,25 @@
 """
 Демонстрация работы сети метеостанций регионального центра.
 
+Точка входа приложения. Собирает слои MVC, создаёт тестовых
+пользователей и прогоняет сквозной сценарий end-to-end:
+
+  регистрация станций и приборов
+        ↓
+  создание наблюдений
+        ↓
+  передача данных
+        ↓
+  контроль качества
+        ↓
+  задержанная передача / обрыв канала
+        ↓
+  отказ основного прибора → резервный
+        ↓
+  планирование и проведение поверки
+        ↓
+  формирование отчёта руководителя
+
 Запуск:
     python main.py
 """
@@ -32,7 +51,9 @@ from meteo_system.views import ConsoleView
 
 
 def main() -> None:
+    # --- Инициализация Model (БД + репозитории + сервисы) ---
     with Database("meteo.db") as db:
+        # reset=True — каждый запуск начинается с чистой БД (для демо)
         db.init_schema(reset=True)
 
         station_repo = StationRepository(db)
@@ -57,6 +78,7 @@ def main() -> None:
             verification_repo,
         )
 
+        # --- View и Controller ---
         view = ConsoleView()
         controller = CenterController(
             stations,
@@ -68,11 +90,14 @@ def main() -> None:
             view,
         )
 
+        # Пользователи с разными ролями
         observer = User(1, "Наблюдатель", Role.OBSERVER)
         operator = User(2, "Оператор центра", Role.OPERATOR)
         manager = User(3, "Руководитель", Role.MANAGER)
 
-        # 1. Регистрация станций и приборов.
+        # ============================================================
+        # 1. Регистрация станций и приборов (роль: руководитель)
+        # ============================================================
         st_a = controller.register_station(
             manager, "ST-001", "Метео-Север", 59.93, 30.31, "наземная"
         )
@@ -83,6 +108,7 @@ def main() -> None:
             manager, "ST-003", "Метео-Юг", 44.60, 40.10, "автоматическая"
         )
 
+        # Основной и резервный термометры на станции A
         dev_main = controller.register_device(
             manager, "Термометр ТМ-1", "термометр", "SN-1001", st_a.id
         )
@@ -92,6 +118,7 @@ def main() -> None:
         dev_reserve.status = "резервный"
         device_repo.update(dev_reserve)
 
+        # Барометр на станции C
         dev_c = controller.register_device(
             manager, "Барометр БМ-1", "барометр", "SN-2001", st_c.id
         )
@@ -99,8 +126,12 @@ def main() -> None:
         now = datetime.now().replace(minute=0, second=0, microsecond=0)
         ts = now.isoformat()
 
+        # ============================================================
+        # Сценарий 1: наблюдение → передача → контроль качества
+        # ============================================================
         view.header("Сценарий 1: наблюдение, передача и контроль качества")
 
+        # Нормальные наблюдения на соседних станциях A и B
         obs_a = controller.create_observation(
             observer,
             st_a,
@@ -119,9 +150,11 @@ def main() -> None:
         )
         controller.transmit_observation(observer, obs_b, channel_available=True)
 
+        # QC для нормального наблюдения
         problems = controller.quality_control(operator, obs_a, st_a)
         view.line(f"Наблюдение A: проблемы = {problems or 'нет'}")
 
+        # Наблюдение с выбросом (температура 95 °C — вне диапазона)
         obs_bad = controller.create_observation(
             observer,
             st_a,
@@ -134,6 +167,7 @@ def main() -> None:
         view.line(f"Наблюдение с выбросом: проблемы = {problems_bad}")
         view.line(f"Статус после контроля: {obs_bad.status}")
 
+        # Обрыв канала: данные накапливаются локально
         obs_c = controller.create_observation(
             observer,
             st_c,
@@ -144,13 +178,14 @@ def main() -> None:
         controller.transmit_observation(observer, obs_c, channel_available=False)
         view.line("Станция C: канал недоступен, данные накоплены локально")
 
+        # Восстановление канала → отправка накопленного
         sent = controller.flush_pending(observer)
         view.line(
             f"Канал восстановлен: передано {len(sent)} задержанных передач; "
             f"is_delayed={sent[0].is_delayed if sent else False}"
         )
 
-        # Явно демонстрируем передачу после срока: это уже не просто "канал был выключен".
+        # Передача после срока (даже при доступном канале) → is_delayed=True
         late_time = now + timedelta(hours=4)
         obs_late = controller.create_observation(
             observer,
@@ -167,12 +202,16 @@ def main() -> None:
             f"{transmission_repo.list()[-1].is_delayed}"
         )
 
+        # Отказ основного прибора → автоматический переход на резервный
         reserve = controller.fail_device(operator, dev_main)
         view.line(
             f"Прибор {dev_main.serial_number} вышел из строя -> "
             f"резервный прибор: {reserve.serial_number if reserve else 'нет'}"
         )
 
+        # ============================================================
+        # Сценарий 2: поверка прибора
+        # ============================================================
         view.header("Сценарий 2: планирование и проведение поверки")
         planned = (now + timedelta(days=3)).date().isoformat()
         verification = controller.schedule_verification(operator, dev_c, planned)
@@ -181,6 +220,9 @@ def main() -> None:
         )
         view.line(f"Поверка выполнена, статус прибора: {dev_c.status}")
 
+        # ============================================================
+        # Отчёт руководителя
+        # ============================================================
         view.header("Отчёт руководителя центра")
         view.line(controller.full_report(manager, now, now))
 

@@ -1,4 +1,10 @@
-"""Model: валидация доменных объектов."""
+"""
+Model: валидаторы предметных данных.
+
+Вся проверка корректности входных данных находится здесь (в Model),
+а не во View и не в Controller. Это защищает систему от обхода интерфейса.
+Каждый валидатор реализует IValidator и возвращает список ошибок.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,29 +15,32 @@ from .models import Device, Observation, Station
 
 
 class StationValidator(IValidator[Station]):
+    """Проверка станции: код, название, координаты."""
+
     def validate(self, entity: Station) -> List[str]:
-        errors = []
-        if not entity.code.strip():
+        errors: List[str] = []
+        if not entity.code or not entity.code.strip():
             errors.append("Код станции не может быть пустым")
-        if not entity.name.strip():
+        if not entity.name or not entity.name.strip():
             errors.append("Название станции не может быть пустым")
-        if not -90 <= entity.latitude <= 90:
-            errors.append("Широта должна находиться в диапазоне от -90 до 90")
-        if not -180 <= entity.longitude <= 180:
-            errors.append("Долгота должна находиться в диапазоне от -180 до 180")
-        if not entity.type.strip():
-            errors.append("Тип станции не может быть пустым")
+        # Широта: −90 … +90, долгота: −180 … +180
+        if not (-90.0 <= entity.latitude <= 90.0):
+            errors.append("Широта должна быть в диапазоне [-90, 90]")
+        if not (-180.0 <= entity.longitude <= 180.0):
+            errors.append("Долгота должна быть в диапазоне [-180, 180]")
         return errors
 
 
 class DeviceValidator(IValidator[Device]):
+    """Проверка прибора: обязательные поля и привязка к станции."""
+
     def validate(self, entity: Device) -> List[str]:
-        errors = []
-        if not entity.name.strip():
+        errors: List[str] = []
+        if not entity.name or not entity.name.strip():
             errors.append("Название прибора не может быть пустым")
-        if not entity.type.strip():
+        if not entity.type or not entity.type.strip():
             errors.append("Тип прибора не может быть пустым")
-        if not entity.serial_number.strip():
+        if not entity.serial_number or not entity.serial_number.strip():
             errors.append("Серийный номер не может быть пустым")
         if entity.station_id is None:
             errors.append("Прибор должен быть закреплён за станцией")
@@ -39,13 +48,16 @@ class DeviceValidator(IValidator[Device]):
 
 
 class ObservationValidator(IValidator[Observation]):
+    """Проверка наблюдения: станция, время, тип, числовые параметры."""
+
     def validate(self, entity: Observation) -> List[str]:
-        errors = []
+        errors: List[str] = []
         if entity.station_id is None:
             errors.append("Наблюдение должно иметь станцию")
         if not entity.observation_time:
             errors.append("Наблюдение должно иметь время")
         else:
+            # Время должно быть в ISO-формате (datetime.fromisoformat)
             try:
                 datetime.fromisoformat(entity.observation_time)
             except ValueError:
