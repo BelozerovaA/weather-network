@@ -77,10 +77,10 @@
 Подробное описание диаграммы UseCase — в [UseCase — Диаграмма пользователей и сценариев](docs/use-case.md)
 
 Подробное описание слоёв, интерфейсов и диаграмма классов — в
-[`docs/mvc-architecture.md`](docs/mvc-architecture.md).
+[MVC-architecture](docs/mvc-architecture.md).
 
 Функциональная модель системы (контекстная диаграмма IDEF0 и декомпозиция на
-подпроцессы) — в [`docs/idef0.md`](docs/idef0.md).
+подпроцессы) — в [IDEF0](docs/idef0.md).
 
 Результаты проверки архитектуры на наличие валидации данных на уровне
 Model — в [`docs/validation-audit.md`](docs/validation-audit.md).
