@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS observations (
     kind TEXT NOT NULL,                -- срочное / промежуточное
     parameters TEXT NOT NULL,          -- JSON: {"temperature": 12.5, ...}
     status TEXT NOT NULL DEFAULT 'создано',
+    flagged INTEGER NOT NULL DEFAULT 0,  -- 1, если QC признавал выбросом
     FOREIGN KEY (station_id) REFERENCES stations(id)
 );
 

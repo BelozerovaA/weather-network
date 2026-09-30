@@ -24,6 +24,16 @@ PARAMETER_RANGES: Dict[str, Tuple[float, float]] = {
 }
 
 
+# Допустимое отклонение от среднего по соседним станциям (по параметрам)
+NEIGHBOR_MAX_DEVIATION: Dict[str, float] = {
+    "temperature": 10.0,
+    "pressure": 15.0,
+    "humidity": 30.0,
+    "wind_speed": 15.0,
+}
+DEFAULT_MAX_DEVIATION = 15.0
+
+
 class QualityCheck(ABC):
     """Базовый интерфейс одной проверки качества."""
 
@@ -55,11 +65,11 @@ class RangeCheck(QualityCheck):
 class NeighborDeviationCheck(QualityCheck):
     """
     Сравнение с наблюдениями соседних станций в тот же срок.
-    Если отклонение больше max_deviation — считаем выбросом.
+    Если отклонение больше допустимого для параметра — считаем выбросом.
     """
 
-    def __init__(self, max_deviation: float = 15.0):
-        self._max_deviation = max_deviation
+    def __init__(self, max_deviation: Optional[Dict[str, float]] = None):
+        self._max_deviation = max_deviation or NEIGHBOR_MAX_DEVIATION
 
     def check(self, observation, neighbors):
         problems = []
@@ -73,7 +83,8 @@ class NeighborDeviationCheck(QualityCheck):
             if not values:
                 continue
             average = sum(values) / len(values)
-            if abs(value - average) > self._max_deviation:
+            limit = self._max_deviation.get(name, DEFAULT_MAX_DEVIATION)
+            if abs(value - average) > limit:
                 problems.append(
                     f"{name}={value} сильно отличается от соседних станций "
                     f"(среднее {average:.1f})"
@@ -87,6 +98,15 @@ class QualityControlEngine:
     def __init__(self, checks: Optional[List[QualityCheck]] = None):
         # По умолчанию — диапазоны + отклонение от соседей
         self._checks = checks or [RangeCheck(), NeighborDeviationCheck()]
+        self._range_check = RangeCheck()
+
+    def is_plausible(self, observation) -> bool:
+        """
+        Физически возможны ли значения. Наблюдения с невозможными значениями
+        нельзя использовать как эталон при сравнении с соседними станциями —
+        иначе выброс «заражает» проверку исправных станций.
+        """
+        return not self._range_check.check(observation, [])
 
     def review(self, observation, neighbors):
         """

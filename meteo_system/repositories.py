@@ -151,23 +151,25 @@ class ObservationRepository(BaseRepository[Observation]):
             observation_time=row["observation_time"],
             kind=row["kind"],
             parameters=json.loads(row["parameters"]),
-            status=row["status"]
+            status=row["status"], flagged=bool(row["flagged"])
         )
 
     def _entity_to_params(self, e):
         return (
             e.station_id, e.observation_time, e.kind,
-            json.dumps(e.parameters, ensure_ascii=False), e.status
+            json.dumps(e.parameters, ensure_ascii=False), e.status,
+            int(e.flagged)
         )
 
     def _insert_sql(self):
         return """INSERT INTO observations
-            (station_id, observation_time, kind, parameters, status)
-            VALUES (?, ?, ?, ?, ?)"""
+            (station_id, observation_time, kind, parameters, status, flagged)
+            VALUES (?, ?, ?, ?, ?, ?)"""
 
     def _update_sql(self):
         return """UPDATE observations SET
-            station_id=?, observation_time=?, kind=?, parameters=?, status=?
+            station_id=?, observation_time=?, kind=?, parameters=?, status=?,
+            flagged=?
             WHERE id=?"""
 
     def list_by_station(self, station_id):
@@ -175,6 +177,22 @@ class ObservationRepository(BaseRepository[Observation]):
             "SELECT * FROM observations WHERE station_id=?", (station_id,)
         )
         return [self._row_to_entity(r) for r in rows]
+
+    def list_by_status(self, status: str):
+        """Наблюдения с заданным статусом (в порядке поступления)."""
+        rows = self._db.query(
+            "SELECT * FROM observations WHERE status=? ORDER BY id", (status,)
+        )
+        return [self._row_to_entity(r) for r in rows]
+
+    def find_slot(self, station_id: int, observation_time: str, kind: str):
+        """Наблюдение станции за конкретный срок (или None)."""
+        rows = self._db.query(
+            """SELECT * FROM observations
+               WHERE station_id=? AND observation_time=? AND kind=?""",
+            (station_id, observation_time, kind),
+        )
+        return self._row_to_entity(rows[0]) if rows else None
 
     def list_between(self, start: str, end: str):
         """Наблюдения в заданном временном диапазоне (ISO-строки)."""
@@ -237,3 +255,21 @@ class VerificationRepository(BaseRepository[Verification]):
             "SELECT * FROM verifications WHERE device_id=?", (device_id,)
         )
         return [self._row_to_entity(r) for r in rows]
+
+    def list_open(self):
+        """Невыполненные поверки (запланированные и просроченные) по дате."""
+        rows = self._db.query(
+            """SELECT * FROM verifications
+               WHERE status IN ('запланировано', 'просрочено')
+               ORDER BY planned_date, id"""
+        )
+        return [self._row_to_entity(r) for r in rows]
+
+    def find_open_for_device(self, device_id):
+        """Невыполненная поверка прибора (или None)."""
+        rows = self._db.query(
+            """SELECT * FROM verifications
+               WHERE device_id=? AND status IN ('запланировано', 'просрочено')""",
+            (device_id,),
+        )
+        return self._row_to_entity(rows[0]) if rows else None

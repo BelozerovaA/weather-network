@@ -1,159 +1,195 @@
 """
 Model: отчёты регионального метеоцентра.
 
-Формирует сводки для руководителя:
-  - полнота поступления данных по станциям;
+Формирует сводки для руководителя за выбранный период:
+  - полнота поступления данных по станциям и срокам;
   - количество выбросов и задержанных передач;
-  - охват приборов поверкой;
+  - охват приборов поверкой (на дату отчёта);
   - плотность наблюдений по географическим районам.
+Производные метрики нигде не хранятся — считаются по первичным данным.
 """
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
+from typing import Dict, List, Optional
 
-from .models import ObservationStatus
-from .schedule import ObservationSchedule
+from .models import ObservationKind, StationStatus
+from .schedule import ObservationSchedule, VerificationPolicy
 
 
 class ReportService:
     """Сбор и форматирование отчёта руководителя."""
 
-    def __init__(
-        self,
-        stations,
-        devices,
-        observations,
-        transmissions,
-        verifications,
-    ):
+    def __init__(self, stations, devices, observations, transmissions, verifications):
         self._stations = stations
         self._devices = devices
         self._observations = observations
         self._transmissions = transmissions
         self._verifications = verifications
 
-    def data_completeness(self, start: datetime, end: datetime):
+    # --- 1. Полнота поступления данных по станциям и срокам -----------------
+    def data_completeness(
+        self, start: datetime, end: datetime, now: Optional[datetime] = None
+    ) -> Dict[str, dict]:
         """
-        Полнота данных: сколько наблюдений пришло относительно
-        ожидаемого числа сроков (срочные + промежуточные).
+        Для каждой действующей станции и каждого типа наблюдений:
+        ожидаемое число сроков, число полученных и список пропущенных сроков.
+        Сроки, которые ещё не наступили (позже now), не ожидаются.
         """
-        expected = ObservationSchedule.expected_count(start, end)
-        report = {}
+        end = min(end, now or datetime.now())
+        received: Dict[tuple, set] = defaultdict(set)
+        for o in self._observations.list():
+            received[(o.station_id, o.kind)].add(o.observation_time)
 
+        report: Dict[str, dict] = {}
         for station in self._stations.list():
-            received = len([
-                o for o in self._observations.list_by_station(station.id)
-                if start.isoformat() <= o.observation_time <= end.isoformat()
-            ])
-            ratio = min(received / expected, 1.0) if expected else 0.0
-            report[station.code] = f"{received}/{expected} ({ratio:.0%})"
-
+            if station.status != StationStatus.ACTIVE:
+                continue
+            per_kind = {}
+            for kind in ObservationKind.ALL:
+                slots = [
+                    s.isoformat(timespec="seconds")
+                    for s in ObservationSchedule.slots_in_period(start, end, kind)
+                ]
+                got = received[(station.id, kind)]
+                missing = [s for s in slots if s not in got]
+                per_kind[kind] = {
+                    "expected": len(slots),
+                    "received": len(slots) - len(missing),
+                    "missing": missing,
+                }
+            report[station.code] = per_kind
         return report
 
-    def outliers_and_delays(self):
-        """Число наблюдений «на перепроверке» и задержанных передач."""
-        outliers = sum(
-            1 for o in self._observations.list()
-            if o.status == ObservationStatus.NEEDS_RECHECK
-        )
-        delayed = sum(
-            1 for t in self._transmissions.list()
-            if t.is_delayed
-        )
-        return {"выбросы": outliers, "задержанные_передачи": delayed}
+    # --- 2. Выбросы и задержанные передачи ----------------------------------
+    def outliers_and_delays(self, start: datetime, end: datetime) -> Dict[str, dict]:
+        """Выбросы (по времени наблюдения) и задержанные передачи (по времени
+        передачи) за период — всего и по станциям."""
+        s_iso, e_iso = start.isoformat(), end.isoformat()
+        code_of = {s.id: s.code for s in self._stations.list()}
+        observations = {o.id: o for o in self._observations.list()}
 
-    def verification_coverage(self):
-        """Доля приборов с актуальным сроком поверки."""
+        by_station: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: {"выбросы": 0, "задержанные_передачи": 0}
+        )
+        for o in observations.values():
+            if o.flagged and s_iso <= o.observation_time <= e_iso:
+                by_station[code_of.get(o.station_id, "?")]["выбросы"] += 1
+        for t in self._transmissions.list():
+            if t.is_delayed and s_iso <= t.transmission_time <= e_iso:
+                owner = observations.get(t.observation_id)
+                code = code_of.get(owner.station_id, "?") if owner else "?"
+                by_station[code]["задержанные_передачи"] += 1
+
+        total = {
+            "выбросы": sum(v["выбросы"] for v in by_station.values()),
+            "задержанные_передачи": sum(
+                v["задержанные_передачи"] for v in by_station.values()
+            ),
+        }
+        return {"всего": total, "по_станциям": dict(by_station)}
+
+    # --- 3. Охват приборов поверкой -----------------------------------------
+    def verification_coverage(self, today: Optional[date] = None) -> dict:
+        """Состояние поверки приборов на дату (охват = действительна/истекает)."""
+        today = today or date.today()
         devices = self._devices.list()
-        today = datetime.now().date().isoformat()
-
-        if not devices:
-            return {"охват": "0/0 (0%)", "истекающие": []}
-
-        covered = sum(
-            1 for d in devices
-            if d.next_verification and d.next_verification >= today
+        groups: Dict[str, List[str]] = defaultdict(list)
+        for d in devices:
+            groups[VerificationPolicy.state(d, today)].append(
+                f"{d.name} ({d.serial_number})"
+                + (f" — до {d.next_verification}" if d.next_verification else "")
+            )
+        covered = (
+            len(groups[VerificationPolicy.VALID])
+            + len(groups[VerificationPolicy.EXPIRING])
         )
-        expiring = [
-            f"{d.name} ({d.serial_number}) — {d.next_verification}"
-            for d in devices
-            if d.next_verification
-            and d.next_verification >= today
-            and d.next_verification <= today
-        ]
+        return {"всего": len(devices), "охвачено": covered, "группы": dict(groups)}
 
+    # --- 4. Плотность наблюдений по районам ---------------------------------
+    def observation_density_by_region(
+        self, start: datetime, end: datetime, grid_deg: float = 5.0
+    ) -> Dict[str, dict]:
+        """Наблюдения за период по географическим ячейкам grid_deg°×grid_deg°."""
+        s_iso, e_iso = start.isoformat(), end.isoformat()
+        cell_of, stations_in = {}, defaultdict(int)
+        for station in self._stations.list():
+            lat = round(station.latitude / grid_deg) * grid_deg
+            lon = round(station.longitude / grid_deg) * grid_deg
+            cell_of[station.id] = f"{lat:.0f}°..{lon:.0f}°"
+            stations_in[cell_of[station.id]] += 1
+
+        counts = defaultdict(int)
+        for o in self._observations.list():
+            if s_iso <= o.observation_time <= e_iso and o.station_id in cell_of:
+                counts[cell_of[o.station_id]] += 1
         return {
-            "охват": f"{covered}/{len(devices)} ({covered / len(devices):.0%})",
-            "истекающие": expiring,
+            cell: {"наблюдения": n, "станции": stations_in[cell]}
+            for cell, n in counts.items()
         }
 
-    def devices_with_expiring_verification(self, within_days=7):
-        """Приборы, у которых поверка истекает в ближайшие дни."""
-        from datetime import timedelta
-
-        threshold = (
-            datetime.now().date() + timedelta(days=within_days)
-        ).isoformat()
-        return [
-            d for d in self._devices.list()
-            if d.next_verification and d.next_verification <= threshold
-        ]
-
-    def observation_density_by_region(self, grid_deg=5.0):
-        """
-        Плотность наблюдений по географическим ячейкам
-        (округление координат до grid_deg градусов).
-        """
-        density = defaultdict(int)
-        station_cell = {}
-
-        for station in self._stations.list():
-            lat_cell = round(station.latitude / grid_deg) * grid_deg
-            lon_cell = round(station.longitude / grid_deg) * grid_deg
-            station_cell[station.id] = (
-                f"{lat_cell:.0f}°..{lon_cell:.0f}°"
-            )
-
-        for observation in self._observations.list():
-            density[
-                station_cell.get(observation.station_id, "неизвестно")
-            ] += 1
-
-        return dict(density)
-
-    def full_report(self, start: datetime, end: datetime):
-        """Сводный текстовый отчёт для руководителя."""
+    # --- Сводный отчёт --------------------------------------------------------
+    def full_report(
+        self, start: datetime, end: datetime, now: Optional[datetime] = None
+    ) -> str:
+        now = now or datetime.now()
+        today = now.date()
         lines = [
             "=== ОТЧЁТ РЕГИОНАЛЬНОГО МЕТЕОЦЕНТРА ===",
-            f"Период: {start.isoformat()} — {end.isoformat()}",
+            f"Период: {start.isoformat(timespec='minutes')} — "
+            f"{end.isoformat(timespec='minutes')}",
             "",
-            "Полнота поступления данных по станциям:",
+            "1. Полнота поступления данных (по станциям и срокам):",
         ]
-
-        for code, value in self.data_completeness(start, end).items():
-            lines.append(f"  {code}: {value}")
-
-        lines.extend(["", "Выбросы и задержанные передачи:"])
-        for key, value in self.outliers_and_delays().items():
-            lines.append(f"  {key}: {value}")
-
-        lines.extend(["", "Охват приборов поверкой:"])
-        coverage = self.verification_coverage()
-        lines.append(f"  {coverage['охват']}")
-        lines.append("  Приборы с истекающим сроком:")
-        expiring = self.devices_with_expiring_verification()
-        if expiring:
-            for device in expiring:
-                lines.append(
-                    f"    - {device.name} ({device.serial_number}): "
-                    f"{device.next_verification}"
+        completeness = self.data_completeness(start, end, now)
+        if not completeness:
+            lines.append("  нет действующих станций")
+        for code, per_kind in completeness.items():
+            parts = []
+            for kind, r in per_kind.items():
+                pct = r["received"] / r["expected"] if r["expected"] else 0.0
+                parts.append(
+                    f"{kind} {r['received']}/{r['expected']} ({pct:.0%})"
                 )
-        else:
-            lines.append("    - нет")
+            lines.append(f"  {code}: " + "; ".join(parts))
+            for kind, r in per_kind.items():
+                if r["missing"]:
+                    shown = ", ".join(m[5:16].replace("T", " ") for m in r["missing"][:4])
+                    more = " …" if len(r["missing"]) > 4 else ""
+                    lines.append(f"      пропущены ({kind}): {shown}{more}")
 
-        lines.extend(["", "Плотность наблюдений по районам:"])
-        for cell, count in self.observation_density_by_region().items():
-            lines.append(f"  {cell}: {count} набл.")
+        lines.extend(["", "2. Выбросы и задержанные передачи:"])
+        stats = self.outliers_and_delays(start, end)
+        lines.append(f"  всего выбросов: {stats['всего']['выбросы']}")
+        lines.append(
+            f"  всего задержанных передач: {stats['всего']['задержанные_передачи']}"
+        )
+        for code, v in sorted(stats["по_станциям"].items()):
+            lines.append(
+                f"    {code}: выбросов {v['выбросы']}, "
+                f"задержанных {v['задержанные_передачи']}"
+            )
 
+        lines.extend(["", f"3. Охват приборов поверкой (на {today.isoformat()}):"])
+        cov = self.verification_coverage(today)
+        pct = cov["охвачено"] / cov["всего"] if cov["всего"] else 0.0
+        lines.append(f"  охвачено {cov['охвачено']}/{cov['всего']} ({pct:.0%})")
+        for state in (
+            VerificationPolicy.EXPIRING, VerificationPolicy.EXPIRED,
+            VerificationPolicy.NEVER,
+        ):
+            for item in cov["группы"].get(state, []):
+                lines.append(f"    [{state}] {item}")
+
+        lines.extend(["", "4. Плотность наблюдений по районам (сетка 5°×5°):"])
+        density = self.observation_density_by_region(start, end)
+        if not density:
+            lines.append("  наблюдений за период нет")
+        for cell, v in sorted(density.items()):
+            avg = v["наблюдения"] / v["станции"] if v["станции"] else 0.0
+            lines.append(
+                f"  {cell}: {v['наблюдения']} набл., станций {v['станции']}, "
+                f"в среднем {avg:.1f} на станцию"
+            )
         return "\n".join(lines)

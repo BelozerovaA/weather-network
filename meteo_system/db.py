@@ -40,7 +40,9 @@ class Database:
     def execute(self, sql: str, params: Tuple[Any, ...] = ()) -> sqlite3.Cursor:
         """Выполнить INSERT/UPDATE/DELETE. Возвращает курсор (для lastrowid)."""
         assert self._conn is not None, "Database не открыта (используйте with)"
-        return self._conn.execute(sql, params)
+        cur = self._conn.execute(sql, params)
+        self._conn.commit()  # данные не теряются, даже если программа аварийно завершится
+        return cur
 
     def query(self, sql: str, params: Tuple[Any, ...] = ()) -> List[sqlite3.Row]:
         """Выполнить SELECT и вернуть список строк."""
@@ -65,3 +67,23 @@ class Database:
         schema_path = Path(__file__).with_name("schema.sql")
         sql = schema_path.read_text(encoding="utf-8")
         self._conn.executescript(sql)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Добавить колонки, появившиеся в новых версиях, в старую БД."""
+        assert self._conn is not None
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(observations)")
+        }
+        if "kind" not in columns:
+            self._conn.execute(
+                "ALTER TABLE observations ADD COLUMN kind TEXT NOT NULL "
+                "DEFAULT 'срочное'"
+            )
+        if "flagged" not in columns:
+            self._conn.execute(
+                "ALTER TABLE observations ADD COLUMN flagged INTEGER NOT NULL "
+                "DEFAULT 0"
+            )
+        self._conn.commit()
