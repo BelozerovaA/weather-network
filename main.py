@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 
-from demo import run_demo
 from meteo_system.bootstrap import build
 from meteo_system.db import Database
 from meteo_system.views import ConsoleView
@@ -19,18 +18,14 @@ from meteo_system.views import ConsoleView
 def main() -> None:
     parser = argparse.ArgumentParser(description="Сеть метеостанций регионального центра")
     parser.add_argument("--db", default=None, help="файл БД SQLite")
-    parser.add_argument("--demo", action="store_true", help="демонстрационный сценарий")
     args = parser.parse_args()
 
     view = ConsoleView()
-    db_path = args.db or ("meteo_demo.db" if args.demo else "meteo.db")
+    db_path = args.db or "meteo.db"
     with Database(db_path) as db:
-        db.init_schema(reset=args.demo)  # демо каждый раз начинается с чистой БД
+        db.init_schema(reset=False)
         center, menu = build(db, view)
-        if args.demo:
-            run_demo(center, view, datetime.now())
-        else:
-            menu.run()
+        menu.run()
 
 
 if __name__ == "__main__":

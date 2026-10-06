@@ -111,12 +111,12 @@ class MalfunctionLog:
     def __init__(self, path="malfunctions_log.csv"):
         self._path = Path(path)
         if not self._path.exists():
-            with self._path.open("w", newline="", encoding="utf-8") as f:
+            with self._path.open("w", newline="", encoding="utf-8-sig") as f:
                 csv.writer(f).writerow(self.HEADER)
 
     def record(self, station_id, device_id, event):
         """Дописать событие в журнал."""
-        with self._path.open("a", newline="", encoding="utf-8") as f:
+        with self._path.open("a", newline="", encoding="utf-8-sig") as f:
             csv.writer(f).writerow([
                 datetime.now().isoformat(timespec="seconds"),
                 station_id, device_id, event
