@@ -19,7 +19,8 @@ class Role:
     OBSERVER = "наблюдатель"      # создаёт наблюдения и передаёт данные
     OPERATOR = "оператор центра"  # контроль качества, поверка, отказы приборов
     MANAGER = "руководитель"      # управление станциями/приборами, отчёты
-    ALL = (OBSERVER, OPERATOR, MANAGER)
+    ANALYST = "синоптик-аналитик"  # просмотр всех станций, аналитика, отметки аномалий
+    ALL = (OBSERVER, OPERATOR, MANAGER, ANALYST)
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +53,11 @@ class DeviceType:
 
 class StationStatus:
     """Жизненный цикл станции."""
+    PENDING = "ожидает подтверждения"  # саморегистрация, данные копятся, в сводки не входят
     ACTIVE = "активна"
     RESERVE = "резерв"
     DECOMMISSIONED = "выведена"
-    ALL = (ACTIVE, RESERVE, DECOMMISSIONED)
+    ALL = (PENDING, ACTIVE, RESERVE, DECOMMISSIONED)
 
 
 class DeviceStatus:
@@ -171,4 +173,33 @@ class Verification:
     device_id: int
     planned_date: str              # ISO date
     status: str = VerificationStatus.PLANNED
+    id: Optional[int] = None
+
+
+@dataclass
+class AnomalyMark:
+    """
+    Отметка синоптика-аналитика: выброс признан подтверждённой аномалией
+    (не ошибкой измерения). Исходное наблюдение при этом не изменяется.
+    """
+    observation_id: int
+    author_id: int
+    author_name: str
+    reason: str
+    created_at: str                # ISO datetime
+    id: Optional[int] = None
+
+
+@dataclass
+class AuditLog:
+    """
+    Запись журнала аудита смены статуса станции
+    (время, инициатор, причина, старый/новый статус).
+    """
+    station_id: int
+    new_status: str
+    initiator: str
+    reason: str
+    created_at: str                # ISO datetime
+    old_status: Optional[str] = None
     id: Optional[int] = None

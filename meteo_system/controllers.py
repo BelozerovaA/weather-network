@@ -35,6 +35,7 @@ class CenterController:
     def __init__(
         self, stations, devices, observations, transmissions,
         verifications, reports, malfunction_log,
+        anomaly_marks=None, audit_log=None,
     ):
         # Ссылки на сервисы Model
         self.stations = stations
@@ -44,6 +45,8 @@ class CenterController:
         self.verifications = verifications
         self.reports = reports
         self.malfunction_log = malfunction_log
+        self.anomaly_marks = anomaly_marks
+        self.audit_log = audit_log
 
     @staticmethod
     def _require(user: User, *roles: str) -> None:
@@ -79,13 +82,28 @@ class CenterController:
         return self.observations.get(observation_id)
 
     # --- Станции и приборы (руководитель) ----------------------------------
-    def register_station(self, user, code, name, latitude, longitude, type_):
+    def register_station(self, user, code, name, latitude, longitude, type_,
+                         pending=False):
         self._require(user, Role.MANAGER)
-        return self.stations.register(code, name, latitude, longitude, type_)
+        return self.stations.register(
+            code, name, latitude, longitude, type_, pending=pending
+        )
 
-    def update_station(self, user, station):
+    def self_register_station(self, user, code, name, latitude, longitude, type_):
+        """Саморегистрация станции (статус «ожидает подтверждения»)."""
+        # Доступно без роли менеджера — имитация автоматического подключения
+        self._require(user, Role.MANAGER, Role.OPERATOR, Role.OBSERVER)
+        return self.stations.register(
+            code, name, latitude, longitude, type_, pending=True
+        )
+
+    def confirm_station(self, user, station, reason="подтверждение включения"):
         self._require(user, Role.MANAGER)
-        self.stations.update(station)
+        return self.stations.confirm(station, initiator=user.name, reason=reason)
+
+    def update_station(self, user, station, reason="изменение данных"):
+        self._require(user, Role.MANAGER)
+        self.stations.update(station, initiator=user.name, reason=reason)
 
     def register_device(self, user, name, type_, serial_number, station_id,
                         last_verification=None):
@@ -170,6 +188,34 @@ class CenterController:
         self._require(user, Role.MANAGER)
         return self.reports.full_report(start, end, now=now)
 
+    # --- Синоптик-аналитик --------------------------------------------------
+    def mark_anomaly(self, user, observation_id, reason):
+        """Отметить выброс как подтверждённую аномалию (исходные данные не меняются)."""
+        self._require(user, Role.ANALYST)
+        if self.anomaly_marks is None:
+            raise RuntimeError("Сервис отметок аномалий не подключён")
+        return self.anomaly_marks.mark(
+            observation_id, user.id, user.name, reason
+        )
+
+    def list_anomaly_marks(self, user, observation_id=None):
+        self._require(user, Role.ANALYST, Role.MANAGER, Role.OPERATOR)
+        if self.anomaly_marks is None:
+            return []
+        if observation_id is not None:
+            return self.anomaly_marks.list_by_observation(observation_id)
+        return self.anomaly_marks.list()
+
+    def list_audit_log(self, user, station_id=None, start=None, end=None):
+        self._require(user, Role.MANAGER, Role.OPERATOR, Role.ANALYST)
+        if self.audit_log is None:
+            return []
+        return self.audit_log.list(station_id, start, end)
+
+    def list_pending_stations(self, user):
+        self._require(user, Role.MANAGER)
+        return self.stations.list_pending()
+
 
 class MenuController:
     """Диалоговое меню: пользователь выбирает роль и действия."""
@@ -178,6 +224,7 @@ class MenuController:
         Role.OBSERVER: User(1, "Наблюдатель", Role.OBSERVER),
         Role.OPERATOR: User(2, "Оператор центра", Role.OPERATOR),
         Role.MANAGER: User(3, "Руководитель", Role.MANAGER),
+        Role.ANALYST: User(4, "Синоптик-аналитик", Role.ANALYST),
     }
 
     def __init__(self, center: CenterController, view,
@@ -242,10 +289,22 @@ class MenuController:
                 ("Запланировать поверку вручную", self.schedule_verification),
                 ("Журнал сбоев приборов", self.show_malfunction_log),
                 ("Список наблюдений", self.show_observations),
+                ("Журнал аудита станций", self.show_audit_log),
                 registry,
             ]
+        if role == Role.ANALYST:
+            return [
+                ("Список наблюдений", self.show_observations),
+                ("Отметить подтверждённую аномалию", self.mark_anomaly),
+                ("Просмотр отметок аномалий", self.show_anomaly_marks),
+                ("Журнал аудита станций", self.show_audit_log),
+                registry,
+            ]
+        # MANAGER
         return [
             ("Зарегистрировать станцию", self.register_station),
+            ("Саморегистрация станции (ожидает подтверждения)", self.self_register_station),
+            ("Подтвердить станцию", self.confirm_station),
             ("Зарегистрировать прибор", self.register_device),
             ("Назначить прибор резервным", self.set_reserve_device),
             ("Изменить станцию", self.edit_station),
@@ -253,6 +312,7 @@ class MenuController:
             registry,
             ("График поверок", self.show_verification_schedule),
             ("Журнал сбоев приборов", self.show_malfunction_log),
+            ("Журнал аудита станций", self.show_audit_log),
             ("Список наблюдений", self.show_observations),
             ("Отчёт руководителя", self.show_report),
         ]
@@ -522,3 +582,70 @@ class MenuController:
         )
         end = view.ask_datetime("Конец периода", now.replace(second=0, microsecond=0))
         view.line(self.center.full_report(self.user, start, end))
+
+    def self_register_station(self) -> None:
+        view = self.view
+        code = view.ask("Код станции")
+        name = view.ask("Название")
+        latitude = view.ask_float("Широта")
+        longitude = view.ask_float("Долгота")
+        type_ = StationType.ALL[view.ask_choice("Тип станции", StationType.ALL)]
+        station = self.center.self_register_station(
+            self.user, code, name, latitude, longitude, type_
+        )
+        view.success(
+            f"Станция {station.code} зарегистрирована со статусом "
+            f"«{station.status}» (id={station.id})"
+        )
+
+    def confirm_station(self) -> None:
+        pending = self.center.list_pending_stations(self.user)
+        if not pending:
+            raise ValueError("Нет станций, ожидающих подтверждения")
+        index = self.view.ask_choice(
+            "Станция", [f"{s.code} — {s.name}" for s in pending]
+        )
+        station = pending[index]
+        reason = self.view.ask("Причина подтверждения", "подтверждение включения")
+        self.center.confirm_station(self.user, station, reason)
+        self.view.success(
+            f"Станция {station.code} подтверждена (статус «{station.status}»)"
+        )
+
+    def mark_anomaly(self) -> None:
+        observations = self.center.list_observations(self.user)
+        if not observations:
+            raise ValueError("Нет наблюдений для отметки")
+        stations = {s.id: s.code for s in self.center.list_stations(self.user)}
+        index = self.view.ask_choice(
+            "Наблюдение",
+            [f"#{o.id} {stations.get(o.station_id, '?')} {o.observation_time} "
+             f"({o.kind}) flagged={o.flagged}" for o in observations],
+        )
+        observation = observations[index]
+        reason = self.view.ask("Обоснование (подтверждённая аномалия)")
+        mark = self.center.mark_anomaly(self.user, observation.id, reason)
+        self.view.success(
+            f"Отметка #{mark.id}: наблюдение #{observation.id} — "
+            f"подтверждённая аномалия (исходные данные не изменены)"
+        )
+
+    def show_anomaly_marks(self) -> None:
+        marks = self.center.list_anomaly_marks(self.user)
+        self.view.header("Отметки подтверждённых аномалий")
+        self.view.table(
+            ["id", "наблюдение", "автор", "обоснование", "время"],
+            [(m.id, m.observation_id, m.author_name, m.reason, m.created_at)
+             for m in marks],
+        )
+
+    def show_audit_log(self) -> None:
+        entries = self.center.list_audit_log(self.user)
+        stations = {s.id: s.code for s in self.center.list_stations(self.user)}
+        self.view.header("Журнал аудита статусов станций")
+        self.view.table(
+            ["id", "станция", "было", "стало", "инициатор", "причина", "время"],
+            [(e.id, stations.get(e.station_id, e.station_id), e.old_status or "—",
+              e.new_status, e.initiator, e.reason, e.created_at)
+             for e in entries],
+        )

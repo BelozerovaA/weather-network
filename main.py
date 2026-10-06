@@ -1,3 +1,10 @@
+"""
+Точка входа: интерактивная работа с системой или демонстрационный сценарий.
+
+    python main.py                 # интерактивное меню (данные в meteo.db)
+    python main.py --demo          # демонстрация на чистой БД meteo_demo.db
+    python main.py --db my.db      # другой файл БД
+"""
 from __future__ import annotations
 
 import argparse

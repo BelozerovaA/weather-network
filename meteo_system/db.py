@@ -59,6 +59,7 @@ class Database:
         if reset:
             # Удаляем в порядке, учитывающем внешние ключи
             for table in (
+                "anomaly_marks", "audit_log",
                 "transmissions", "verifications", "observations",
                 "devices", "stations",
             ):
@@ -70,7 +71,7 @@ class Database:
         self._migrate()
 
     def _migrate(self) -> None:
-        """Добавить колонки, появившиеся в новых версиях, в старую БД."""
+        """Добавить колонки/таблицы, появившиеся в новых версиях, в старую БД."""
         assert self._conn is not None
         columns = {
             row["name"]
@@ -86,4 +87,34 @@ class Database:
                 "ALTER TABLE observations ADD COLUMN flagged INTEGER NOT NULL "
                 "DEFAULT 0"
             )
+        # Таблицы ЛР №4
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS anomaly_marks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL,
+                author_name TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (observation_id) REFERENCES observations(id)
+            )"""
+        )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                station_id INTEGER NOT NULL,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                initiator TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (station_id) REFERENCES stations(id)
+            )"""
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_station ON audit_log(station_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)"
+        )
         self._conn.commit()

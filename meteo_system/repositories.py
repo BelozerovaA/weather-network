@@ -14,7 +14,10 @@ from typing import Generic, List, Optional, TypeVar
 
 from .db import Database
 from .interfaces import IRepository
-from .models import Device, Observation, Station, Transmission, Verification
+from .models import (
+    AnomalyMark, AuditLog, Device, Observation, Station, Transmission,
+    Verification,
+)
 
 T = TypeVar("T")
 
@@ -273,3 +276,95 @@ class VerificationRepository(BaseRepository[Verification]):
             (device_id,),
         )
         return self._row_to_entity(rows[0]) if rows else None
+
+
+class AnomalyMarkRepository(BaseRepository[AnomalyMark]):
+    table = "anomaly_marks"
+
+    def _row_to_entity(self, row):
+        return AnomalyMark(
+            id=row["id"],
+            observation_id=row["observation_id"],
+            author_id=row["author_id"],
+            author_name=row["author_name"],
+            reason=row["reason"],
+            created_at=row["created_at"],
+        )
+
+    def _entity_to_params(self, e):
+        return (e.observation_id, e.author_id, e.author_name, e.reason, e.created_at)
+
+    def _insert_sql(self):
+        return """INSERT INTO anomaly_marks
+            (observation_id, author_id, author_name, reason, created_at)
+            VALUES (?, ?, ?, ?, ?)"""
+
+    def _update_sql(self):
+        return """UPDATE anomaly_marks SET
+            observation_id=?, author_id=?, author_name=?, reason=?, created_at=?
+            WHERE id=?"""
+
+    def list_by_observation(self, observation_id):
+        rows = self._db.query(
+            "SELECT * FROM anomaly_marks WHERE observation_id=? ORDER BY id",
+            (observation_id,),
+        )
+        return [self._row_to_entity(r) for r in rows]
+
+
+class AuditLogRepository(BaseRepository[AuditLog]):
+    table = "audit_log"
+
+    def _row_to_entity(self, row):
+        return AuditLog(
+            id=row["id"],
+            station_id=row["station_id"],
+            old_status=row["old_status"],
+            new_status=row["new_status"],
+            initiator=row["initiator"],
+            reason=row["reason"],
+            created_at=row["created_at"],
+        )
+
+    def _entity_to_params(self, e):
+        return (
+            e.station_id, e.old_status, e.new_status,
+            e.initiator, e.reason, e.created_at,
+        )
+
+    def _insert_sql(self):
+        return """INSERT INTO audit_log
+            (station_id, old_status, new_status, initiator, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)"""
+
+    def _update_sql(self):
+        return """UPDATE audit_log SET
+            station_id=?, old_status=?, new_status=?, initiator=?, reason=?,
+            created_at=? WHERE id=?"""
+
+    def list_by_station(self, station_id, start=None, end=None):
+        """Фильтр по станции и (опционально) периоду."""
+        sql = "SELECT * FROM audit_log WHERE station_id=?"
+        params: list = [station_id]
+        if start:
+            sql += " AND created_at >= ?"
+            params.append(start)
+        if end:
+            sql += " AND created_at <= ?"
+            params.append(end)
+        sql += " ORDER BY created_at, id"
+        rows = self._db.query(sql, tuple(params))
+        return [self._row_to_entity(r) for r in rows]
+
+    def list_between(self, start=None, end=None):
+        sql = "SELECT * FROM audit_log WHERE 1=1"
+        params: list = []
+        if start:
+            sql += " AND created_at >= ?"
+            params.append(start)
+        if end:
+            sql += " AND created_at <= ?"
+            params.append(end)
+        sql += " ORDER BY created_at, id"
+        rows = self._db.query(sql, tuple(params))
+        return [self._row_to_entity(r) for r in rows]
