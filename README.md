@@ -96,7 +96,6 @@ python main.py
 
 # Демонстрация end-to-end на чистой БД
 python main.py --demo
-python main.py --demo --db /tmp/meteo_demo.db
 
 # Другой файл БД
 python main.py --db my.db
