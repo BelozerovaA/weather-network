@@ -8,13 +8,14 @@ from .controllers import CenterController, MenuController
 from .db import Database
 from .quality import QualityControlEngine
 from .repositories import (
-    DeviceRepository, ObservationRepository, StationRepository,
-    TransmissionRepository, VerificationRepository,
+    AnomalyMarkRepository, AuditLogRepository, DeviceRepository,
+    ObservationRepository, StationRepository, TransmissionRepository,
+    VerificationRepository,
 )
 from .reports import ReportService
 from .services import (
-    DeviceService, MalfunctionLog, ObservationService, StationService,
-    TransmissionService, VerificationService,
+    AnomalyMarkService, AuditLogService, DeviceService, MalfunctionLog,
+    ObservationService, StationService, TransmissionService, VerificationService,
 )
 
 
@@ -30,15 +31,19 @@ def build(
     observation_repo = ObservationRepository(db)
     transmission_repo = TransmissionRepository(db)
     verification_repo = VerificationRepository(db)
+    anomaly_repo = AnomalyMarkRepository(db)
+    audit_repo = AuditLogRepository(db)
 
     log = MalfunctionLog(log_path)
-    stations = StationService(station_repo)
+    stations = StationService(station_repo, audit_repo)
     devices = DeviceService(device_repo, log, stations)
     observations = ObservationService(
         observation_repo, stations, QualityControlEngine(), devices
     )
     transmissions = TransmissionService(transmission_repo, observation_repo)
     verifications = VerificationService(verification_repo, device_repo)
+    anomaly_marks = AnomalyMarkService(anomaly_repo, observation_repo)
+    audit_log = AuditLogService(audit_repo)
     reports = ReportService(
         station_repo, device_repo, observation_repo,
         transmission_repo, verification_repo,
@@ -46,6 +51,6 @@ def build(
 
     center = CenterController(
         stations, devices, observations, transmissions,
-        verifications, reports, log,
+        verifications, reports, log, anomaly_marks, audit_log,
     )
     return center, MenuController(center, view, clock)

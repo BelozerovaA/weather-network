@@ -54,3 +54,29 @@ CREATE TABLE IF NOT EXISTS verifications (
     status TEXT NOT NULL DEFAULT 'запланировано',
     FOREIGN KEY (device_id) REFERENCES devices(id)
 );
+
+-- Отметки подтверждённых аномалий (синоптик-аналитик; исходное наблюдение не меняется)
+CREATE TABLE IF NOT EXISTS anomaly_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observation_id INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    author_name TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (observation_id) REFERENCES observations(id)
+);
+
+-- Журнал аудита смен статуса станции (хранение ≥ 3 лет)
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_id INTEGER NOT NULL,
+    old_status TEXT,
+    new_status TEXT NOT NULL,
+    initiator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (station_id) REFERENCES stations(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_station ON audit_log(station_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);

@@ -14,13 +14,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .models import (
-    Device, DeviceStatus, Observation, ObservationStatus, Station,
-    StationStatus, Transmission, Verification, VerificationStatus,
+    AnomalyMark, AuditLog, Device, DeviceStatus, Observation,
+    ObservationStatus, Station, StationStatus, Transmission, Verification,
+    VerificationStatus,
 )
 from .quality import QualityControlEngine
 from .repositories import (
-    DeviceRepository, ObservationRepository, StationRepository,
-    TransmissionRepository, VerificationRepository,
+    AnomalyMarkRepository, AuditLogRepository, DeviceRepository,
+    ObservationRepository, StationRepository, TransmissionRepository,
+    VerificationRepository,
 )
 from .schedule import ObservationSchedule, VerificationPolicy
 from .validators import DeviceValidator, ObservationValidator, StationValidator
@@ -44,25 +46,75 @@ def _parse_date(value: str, what: str) -> date:
 class StationService:
     """Регистрация и поиск станций, расчёт соседей для контроля качества."""
 
-    def __init__(self, stations: StationRepository):
+    def __init__(
+        self,
+        stations: StationRepository,
+        audit_log: Optional[AuditLogRepository] = None,
+    ):
         self._stations = stations
+        self._audit = audit_log
         self._validator = StationValidator()
 
-    def register(self, code, name, latitude, longitude, type_):
-        """Создать станцию после валидации и проверки уникальности кода."""
-        station = Station(code.strip(), name.strip(), latitude, longitude, type_)
+    def register(self, code, name, latitude, longitude, type_, pending=False):
+        """
+        Создать станцию после валидации и проверки уникальности кода.
+        pending=True — саморегистрация (статус «ожидает подтверждения»).
+        """
+        status = StationStatus.PENDING if pending else StationStatus.ACTIVE
+        station = Station(
+            code.strip(), name.strip(), latitude, longitude, type_, status=status
+        )
         _raise_if(self._validator.validate(station))
         if self._stations.find_by_code(station.code):
             raise ValueError(f"Код станции {station.code} уже используется")
-        return self._stations.add(station)
+        station = self._stations.add(station)
+        self._log_status_change(
+            station, None, station.status, "система", "регистрация станции"
+        )
+        return station
 
-    def update(self, station):
-        """Обновить станцию с повторной валидацией."""
+    def confirm(self, station, initiator: str, reason: str = "подтверждение включения"):
+        """Руководитель подтверждает станцию, ожидающую включения в сеть."""
+        if station.status != StationStatus.PENDING:
+            raise ValueError(
+                f"Подтвердить можно только станцию в статусе "
+                f"«{StationStatus.PENDING}» (сейчас «{station.status}»)"
+            )
+        old = station.status
+        station.status = StationStatus.ACTIVE
+        _raise_if(self._validator.validate(station))
+        self._stations.update(station)
+        self._log_status_change(station, old, station.status, initiator, reason)
+        return station
+
+    def change_status(self, station, new_status: str, initiator: str, reason: str):
+        """Смена статуса станции с записью в журнал аудита."""
+        if new_status not in StationStatus.ALL:
+            raise ValueError(f"Неизвестный статус станции: {new_status}")
+        if not reason or not reason.strip():
+            raise ValueError("Причина смены статуса обязательна")
+        old = station.status
+        if old == new_status:
+            return station
+        station.status = new_status
+        _raise_if(self._validator.validate(station))
+        self._stations.update(station)
+        self._log_status_change(station, old, new_status, initiator, reason.strip())
+        return station
+
+    def update(self, station, initiator: str = "руководитель", reason: str = ""):
+        """Обновить станцию с повторной валидацией и аудитом смены статуса."""
         _raise_if(self._validator.validate(station))
         existing = self._stations.find_by_code(station.code)
         if existing and existing.id != station.id:
             raise ValueError(f"Код станции {station.code} уже используется")
+        prev = self._stations.get(station.id) if station.id else None
         self._stations.update(station)
+        if prev and prev.status != station.status:
+            self._log_status_change(
+                station, prev.status, station.status, initiator,
+                reason or "изменение статуса",
+            )
 
     def get(self, station_id):
         station = self._stations.get(station_id)
@@ -73,9 +125,27 @@ class StationService:
     def list(self):
         return self._stations.list()
 
+    def list_pending(self):
+        """Станции, ожидающие подтверждения руководителем."""
+        return [s for s in self._stations.list() if s.status == StationStatus.PENDING]
+
     def all_active(self):
-        """Вернуть только действующие станции."""
+        """Вернуть только действующие станции (без PENDING)."""
         return [s for s in self._stations.list() if s.status == StationStatus.ACTIVE]
+
+    def _log_status_change(self, station, old_status, new_status, initiator, reason):
+        if self._audit is None or station.id is None:
+            return
+        self._audit.add(
+            AuditLog(
+                station_id=station.id,
+                old_status=old_status,
+                new_status=new_status,
+                initiator=initiator,
+                reason=reason,
+                created_at=datetime.now().isoformat(timespec="seconds"),
+            )
+        )
 
     def neighbors(self, station, radius_km=300.0):
         """Станции в радиусе radius_km (для сравнения наблюдений)."""
@@ -304,8 +374,11 @@ class ObservationService:
         на станции исправного прибора с действующей поверкой для каждого
         измеряемого параметра.
         """
-        if station.status != StationStatus.ACTIVE:
-            raise ValueError(f"Станция {station.code} не активна")
+        if station.status not in (StationStatus.ACTIVE, StationStatus.PENDING):
+            raise ValueError(
+                f"Станция {station.code} не принимает наблюдения "
+                f"(статус «{station.status}»)"
+            )
         try:  # единый формат времени, чтобы сроки сравнивались как строки
             observation_time = datetime.fromisoformat(observation_time).isoformat(
                 timespec="seconds"
@@ -525,3 +598,57 @@ class VerificationService:
         device.last_verification = done_date
         device.next_verification = VerificationPolicy.next_due(done_date)
         self._devices.update(device)
+
+
+# ---------------------------------------------------------------------------
+# Подтверждённые аномалии (синоптик-аналитик)
+# ---------------------------------------------------------------------------
+class AnomalyMarkService:
+    """Отметка выброса как подтверждённой аномалии без изменения наблюдения."""
+
+    def __init__(self, marks: AnomalyMarkRepository, observations: ObservationRepository):
+        self._marks = marks
+        self._observations = observations
+
+    def mark(
+        self,
+        observation_id: int,
+        author_id: int,
+        author_name: str,
+        reason: str,
+    ) -> AnomalyMark:
+        if not reason or not reason.strip():
+            raise ValueError("Обоснование отметки аномалии обязательно")
+        observation = self._observations.get(observation_id)
+        if observation is None:
+            raise ValueError(f"Наблюдение с id={observation_id} не найдено")
+        # Исходное наблюдение не изменяется — только добавляется отметка
+        mark = AnomalyMark(
+            observation_id=observation_id,
+            author_id=author_id,
+            author_name=author_name.strip(),
+            reason=reason.strip(),
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        return self._marks.add(mark)
+
+    def list_by_observation(self, observation_id: int):
+        return self._marks.list_by_observation(observation_id)
+
+    def list(self):
+        return self._marks.list()
+
+
+# ---------------------------------------------------------------------------
+# Журнал аудита
+# ---------------------------------------------------------------------------
+class AuditLogService:
+    """Чтение журнала аудита смен статуса станций."""
+
+    def __init__(self, audit: AuditLogRepository):
+        self._audit = audit
+
+    def list(self, station_id=None, start=None, end=None):
+        if station_id is not None:
+            return self._audit.list_by_station(station_id, start, end)
+        return self._audit.list_between(start, end)
