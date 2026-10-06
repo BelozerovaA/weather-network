@@ -13,7 +13,7 @@ from typing import List
 
 from .interfaces import IValidator
 from .models import (
-    Device, DeviceStatus, Observation, ObservationKind, Station,
+    Device, DeviceStatus, DeviceType, Observation, ObservationKind, Station,
     StationStatus, StationType,
 )
 from .quality import PARAMETER_RANGES
@@ -68,6 +68,10 @@ class DeviceValidator(IValidator[Device]):
             errors.append("Название прибора не может быть пустым")
         if not entity.type or not entity.type.strip():
             errors.append("Тип прибора не может быть пустым")
+        elif entity.type not in DeviceType.ALL:
+            errors.append(
+                "Тип прибора должен быть одним из: " + ", ".join(DeviceType.ALL)
+            )
         if not entity.serial_number or not entity.serial_number.strip():
             errors.append("Серийный номер не может быть пустым")
         if entity.station_id is None:

@@ -34,6 +34,22 @@ class StationType:
     ALL = (GROUND, AEROLOGICAL, MARINE, AUTOMATIC)
 
 
+class DeviceType:
+    """Справочник типов измерительных приборов."""
+    THERMOMETER = "термометр"
+    BAROMETER = "барометр"
+    HYGROMETER = "гигрометр"
+    ANEMOMETER = "анемометр"
+    ALL = (THERMOMETER, BAROMETER, HYGROMETER, ANEMOMETER)
+    # Какой метеопараметр измеряет прибор данного типа
+    MEASURES = {
+        THERMOMETER: "temperature",
+        BAROMETER: "pressure",
+        HYGROMETER: "humidity",
+        ANEMOMETER: "wind_speed",
+    }
+
+
 class StationStatus:
     """Жизненный цикл станции."""
     ACTIVE = "активна"

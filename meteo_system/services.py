@@ -124,7 +124,7 @@ class MalfunctionLog:
 
     def read(self) -> List[List[str]]:
         """Все записи журнала (без заголовка)."""
-        with self._path.open(newline="", encoding="utf-8") as f:
+        with self._path.open(newline="", encoding="utf-8-sig") as f:
             return list(csv.reader(f))[1:]
 
 
@@ -290,14 +290,20 @@ class TransmissionService:
 class ObservationService:
     """Создание наблюдений, контроль качества, исправление выбросов."""
 
-    def __init__(self, observations, stations, qc_engine):
+    def __init__(self, observations, stations, qc_engine, devices=None):
         self._observations = observations
         self._stations = stations
         self._qc = qc_engine
+        self._devices = devices  # DeviceService | DeviceRepository | None
         self._validator = ObservationValidator()
 
     def create(self, station, observation_time, kind, parameters):
-        """Создать наблюдение после валидации (срок, тип, параметры)."""
+        """Создать наблюдение после валидации (срок, тип, параметры).
+
+        Если передан сервис приборов, дополнительно проверяется наличие
+        на станции исправного прибора с действующей поверкой для каждого
+        измеряемого параметра.
+        """
         if station.status != StationStatus.ACTIVE:
             raise ValueError(f"Станция {station.code} не активна")
         try:  # единый формат времени, чтобы сроки сравнивались как строки
@@ -318,7 +324,44 @@ class ObservationService:
                 f"Наблюдение станции {station.code} за срок {observation_time} "
                 f"({kind}) уже внесено"
             )
+        self._ensure_verified_devices(station, parameters)
         return self._observations.add(observation)
+
+    def _ensure_verified_devices(self, station, parameters) -> None:
+        """Блокировать ввод, если нет исправного поверенного прибора для параметра."""
+        if self._devices is None or not parameters:
+            return
+        from .models import DeviceType  # локально, чтобы не плодить циклы импорта
+
+        today = date.today()
+        devices = self._devices.list_by_station(station.id)
+        # параметр -> есть ли прибор OK с действующей поверкой
+        ok_params = set()
+        for d in devices:
+            if d.status != DeviceStatus.OK:
+                continue
+            state = VerificationPolicy.state(d, today)
+            if state in (VerificationPolicy.EXPIRED, VerificationPolicy.NEVER):
+                continue
+            measured = DeviceType.MEASURES.get(d.type)
+            if measured:
+                ok_params.add(measured)
+        missing = []
+        for name in parameters:
+            # параметр без привязки к типу прибора (неизвестный) не блокируем
+            required_types = [
+                t for t, p in DeviceType.MEASURES.items() if p == name
+            ]
+            if not required_types:
+                continue
+            if name not in ok_params:
+                missing.append(name)
+        if missing:
+            raise ValueError(
+                "Нет исправного прибора с действующей поверкой для параметров: "
+                + ", ".join(missing)
+                + ". Выполните поверку или назначьте резервный прибор."
+            )
 
     def get(self, observation_id):
         observation = self._observations.get(observation_id)

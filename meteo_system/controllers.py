@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Callable, List, Optional, Tuple
 
 from .models import (
-    DeviceStatus, ObservationKind, ObservationStatus, Role, Station,
+    DeviceStatus, DeviceType, ObservationKind, ObservationStatus, Role, Station,
     StationStatus, StationType, User,
 )
 from .quality import PARAMETER_RANGES
@@ -166,9 +166,9 @@ class CenterController:
         return self.malfunction_log.read()
 
     # --- Отчётность (руководитель) -----------------------------------------
-    def full_report(self, user, start, end):
+    def full_report(self, user, start, end, now=None):
         self._require(user, Role.MANAGER)
-        return self.reports.full_report(start, end)
+        return self.reports.full_report(start, end, now=now)
 
 
 class MenuController:
@@ -483,7 +483,7 @@ class MenuController:
         view = self.view
         station = self._pick_station()
         name = view.ask("Название прибора")
-        type_ = view.ask("Тип прибора (термометр, барометр, …)")
+        type_ = DeviceType.ALL[view.ask_choice("Тип прибора", DeviceType.ALL)]
         serial = view.ask("Серийный номер")
         last = None
         if view.ask_yes_no("Известна дата последней поверки?", default=False):

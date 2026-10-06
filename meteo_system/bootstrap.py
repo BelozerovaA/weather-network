@@ -34,7 +34,9 @@ def build(
     log = MalfunctionLog(log_path)
     stations = StationService(station_repo)
     devices = DeviceService(device_repo, log, stations)
-    observations = ObservationService(observation_repo, stations, QualityControlEngine())
+    observations = ObservationService(
+        observation_repo, stations, QualityControlEngine(), devices
+    )
     transmissions = TransmissionService(transmission_repo, observation_repo)
     verifications = VerificationService(verification_repo, device_repo)
     reports = ReportService(
