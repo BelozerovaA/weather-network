@@ -460,10 +460,11 @@ class ObservationService:
         neighbor_ids = {s.id for s in self._stations.neighbors(station)}
         neighbor_obs = [
             o for o in self._observations.list_between(
-                observation.observation_time, observation.observation_time
+                observation.observation_time,
+                observation.observation_time,
+                station_ids=neighbor_ids,
             )
-            if o.station_id in neighbor_ids
-            and self._qc.is_plausible(o)  # физически невозможное не служит эталоном
+            if self._qc.is_plausible(o)  # физически невозможное не служит эталоном
         ]
         ok, problems = self._qc.review(observation, neighbor_obs)
         if ok:
@@ -475,14 +476,59 @@ class ObservationService:
         return problems
 
     def review_incoming(self) -> List[Tuple[Observation, Station, List[str]]]:
-        """Контроль качества всех поступивших и ещё не проверенных наблюдений."""
+        """Контроль качества всех поступивших и ещё не проверенных наблюдений.
+
+        Оптимизации (ЛР №5):
+          - станции и граф соседей загружаются один раз (O(S²) вместо O(N·S²));
+          - наблюдения за каждый срок читаются одним запросом;
+          - статусы фиксируются одной транзакцией (без commit на каждую запись).
+        Результат по каждому наблюдению идентичен прежнему run_quality_control.
+        """
+        pending = self._observations.list_by_status(ObservationStatus.TRANSMITTED)
+        if not pending:
+            return []
+
+        # 1. Реестр станций и кэш соседей — один раз на весь прогон
+        stations_by_id = {s.id: s for s in self._stations.list()}
+        neighbor_ids_of: dict = {}
+        for sid, station in stations_by_id.items():
+            neighbor_ids_of[sid] = {s.id for s in self._stations.neighbors(station)}
+
+        # 2. Группировка по сроку → один list_between на группу
+        by_time: dict = {}
+        for obs in pending:
+            by_time.setdefault(obs.observation_time, []).append(obs)
+
         results = []
-        for observation in self._observations.list_by_status(
-            ObservationStatus.TRANSMITTED
-        ):
-            station = self._stations.get(observation.station_id)
-            problems = self.run_quality_control(observation, station)
-            results.append((observation, station, problems))
+        for obs_time, group in by_time.items():
+            # Все наблюдения этого срока (для эталонов соседей)
+            same_slot = self._observations.list_between(obs_time, obs_time)
+            by_station = {o.station_id: o for o in same_slot}
+
+            for observation in group:
+                station = stations_by_id.get(observation.station_id)
+                if station is None:
+                    station = self._stations.get(observation.station_id)
+                    stations_by_id[station.id] = station
+
+                n_ids = neighbor_ids_of.get(observation.station_id, set())
+                neighbor_obs = [
+                    by_station[nid]
+                    for nid in n_ids
+                    if nid in by_station and self._qc.is_plausible(by_station[nid])
+                ]
+                ok, problems = self._qc.review(observation, neighbor_obs)
+                if ok:
+                    observation.status = ObservationStatus.ACCEPTED
+                else:
+                    observation.status = ObservationStatus.NEEDS_RECHECK
+                    observation.flagged = True
+                # commit=False — одна транзакция на весь batch
+                self._observations.update(observation, commit=False)
+                results.append((observation, station, problems))
+
+        # 3. Одна фиксация вместо N commit
+        self._observations._db.commit()
         return results
 
     def correct(self, observation, parameters):

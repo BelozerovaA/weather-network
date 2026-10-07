@@ -7,6 +7,11 @@ Model: отчёты регионального метеоцентра.
   - охват приборов поверкой (на дату отчёта);
   - плотность наблюдений по географическим районам.
 Производные метрики нигде не хранятся — считаются по первичным данным.
+
+Оптимизации ЛР №5:
+  - один лёгкий SELECT (без JSON parameters) вместо трёх полных list();
+  - slots_in_period считается один раз на kind, а не на каждую станцию;
+  - фильтр периода на стороне SQL.
 """
 from __future__ import annotations
 
@@ -28,9 +33,16 @@ class ReportService:
         self._transmissions = transmissions
         self._verifications = verifications
 
+    def _load_obs_summary(self, start: datetime, end: datetime):
+        """Один лёгкий запрос наблюдений за период (без json.loads)."""
+        return self._observations.list_summary(
+            start.isoformat(), end.isoformat()
+        )
+
     # --- 1. Полнота поступления данных по станциям и срокам -----------------
     def data_completeness(
-        self, start: datetime, end: datetime, now: Optional[datetime] = None
+        self, start: datetime, end: datetime, now: Optional[datetime] = None,
+        _obs_summary=None,
     ) -> Dict[str, dict]:
         """
         Для каждой действующей станции и каждого типа наблюдений:
@@ -38,9 +50,21 @@ class ReportService:
         Сроки, которые ещё не наступили (позже now), не ожидаются.
         """
         end = min(end, now or datetime.now())
+        if _obs_summary is None:
+            _obs_summary = self._load_obs_summary(start, end)
+
         received: Dict[tuple, set] = defaultdict(set)
-        for o in self._observations.list():
-            received[(o.station_id, o.kind)].add(o.observation_time)
+        for o in _obs_summary:
+            received[(o["station_id"], o["kind"])].add(o["observation_time"])
+
+        # Слоты периода — один раз на kind (не на каждую станцию)
+        slots_by_kind = {
+            kind: [
+                s.isoformat(timespec="seconds")
+                for s in ObservationSchedule.slots_in_period(start, end, kind)
+            ]
+            for kind in ObservationKind.ALL
+        }
 
         report: Dict[str, dict] = {}
         for station in self._stations.list():
@@ -48,10 +72,7 @@ class ReportService:
                 continue
             per_kind = {}
             for kind in ObservationKind.ALL:
-                slots = [
-                    s.isoformat(timespec="seconds")
-                    for s in ObservationSchedule.slots_in_period(start, end, kind)
-                ]
+                slots = slots_by_kind[kind]
                 got = received[(station.id, kind)]
                 missing = [s for s in slots if s not in got]
                 per_kind[kind] = {
@@ -63,24 +84,47 @@ class ReportService:
         return report
 
     # --- 2. Выбросы и задержанные передачи ----------------------------------
-    def outliers_and_delays(self, start: datetime, end: datetime) -> Dict[str, dict]:
+    def outliers_and_delays(
+        self, start: datetime, end: datetime, _obs_summary=None
+    ) -> Dict[str, dict]:
         """Выбросы (по времени наблюдения) и задержанные передачи (по времени
         передачи) за период — всего и по станциям."""
         s_iso, e_iso = start.isoformat(), end.isoformat()
         code_of = {s.id: s.code for s in self._stations.list()}
-        observations = {o.id: o for o in self._observations.list()}
+
+        if _obs_summary is None:
+            _obs_summary = self._load_obs_summary(start, end)
+
+        # id → station_id: сначала из summary за период, дополняем лёгким
+        # запросом без JSON для передач, чьи наблюдения вне периода
+        obs_station = {o["id"]: o["station_id"] for o in _obs_summary}
 
         by_station: Dict[str, Dict[str, int]] = defaultdict(
             lambda: {"выбросы": 0, "задержанные_передачи": 0}
         )
-        for o in observations.values():
-            if o.flagged and s_iso <= o.observation_time <= e_iso:
-                by_station[code_of.get(o.station_id, "?")]["выбросы"] += 1
-        for t in self._transmissions.list():
-            if t.is_delayed and s_iso <= t.transmission_time <= e_iso:
-                owner = observations.get(t.observation_id)
-                code = code_of.get(owner.station_id, "?") if owner else "?"
-                by_station[code]["задержанные_передачи"] += 1
+        for o in _obs_summary:
+            if o["flagged"]:
+                by_station[code_of.get(o["station_id"], "?")]["выбросы"] += 1
+
+        delayed_txs = [
+            t for t in self._transmissions.list()
+            if t.is_delayed and s_iso <= t.transmission_time <= e_iso
+        ]
+        missing_ids = [
+            t.observation_id for t in delayed_txs if t.observation_id not in obs_station
+        ]
+        if missing_ids:
+            # один лёгкий SELECT без parameters (не полный list)
+            extra = self._observations.list_summary()
+            for o in extra:
+                if o["id"] in obs_station:
+                    continue
+                obs_station[o["id"]] = o["station_id"]
+
+        for t in delayed_txs:
+            sid = obs_station.get(t.observation_id)
+            code = code_of.get(sid, "?") if sid is not None else "?"
+            by_station[code]["задержанные_передачи"] += 1
 
         total = {
             "выбросы": sum(v["выбросы"] for v in by_station.values()),
@@ -109,10 +153,10 @@ class ReportService:
 
     # --- 4. Плотность наблюдений по районам ---------------------------------
     def observation_density_by_region(
-        self, start: datetime, end: datetime, grid_deg: float = 5.0
+        self, start: datetime, end: datetime, grid_deg: float = 5.0,
+        _obs_summary=None,
     ) -> Dict[str, dict]:
         """Наблюдения за период по географическим ячейкам grid_deg°×grid_deg°."""
-        s_iso, e_iso = start.isoformat(), end.isoformat()
         cell_of, stations_in = {}, defaultdict(int)
         for station in self._stations.list():
             lat = round(station.latitude / grid_deg) * grid_deg
@@ -120,10 +164,13 @@ class ReportService:
             cell_of[station.id] = f"{lat:.0f}°..{lon:.0f}°"
             stations_in[cell_of[station.id]] += 1
 
+        if _obs_summary is None:
+            _obs_summary = self._load_obs_summary(start, end)
+
         counts = defaultdict(int)
-        for o in self._observations.list():
-            if s_iso <= o.observation_time <= e_iso and o.station_id in cell_of:
-                counts[cell_of[o.station_id]] += 1
+        for o in _obs_summary:
+            if o["station_id"] in cell_of:
+                counts[cell_of[o["station_id"]]] += 1
         return {
             cell: {"наблюдения": n, "станции": stations_in[cell]}
             for cell, n in counts.items()
@@ -135,6 +182,11 @@ class ReportService:
     ) -> str:
         now = now or datetime.now()
         today = now.date()
+        end_eff = min(end, now)
+
+        # Один проход по наблюдениям на весь отчёт
+        obs_summary = self._load_obs_summary(start, end_eff)
+
         lines = [
             "=== ОТЧЁТ РЕГИОНАЛЬНОГО МЕТЕОЦЕНТРА ===",
             f"Период: {start.isoformat(timespec='minutes')} — "
@@ -142,7 +194,9 @@ class ReportService:
             "",
             "1. Полнота поступления данных (по станциям и срокам):",
         ]
-        completeness = self.data_completeness(start, end, now)
+        completeness = self.data_completeness(
+            start, end, now, _obs_summary=obs_summary
+        )
         if not completeness:
             lines.append("  нет действующих станций")
         for code, per_kind in completeness.items():
@@ -160,7 +214,7 @@ class ReportService:
                     lines.append(f"      пропущены ({kind}): {shown}{more}")
 
         lines.extend(["", "2. Выбросы и задержанные передачи:"])
-        stats = self.outliers_and_delays(start, end)
+        stats = self.outliers_and_delays(start, end, _obs_summary=obs_summary)
         lines.append(f"  всего выбросов: {stats['всего']['выбросы']}")
         lines.append(
             f"  всего задержанных передач: {stats['всего']['задержанные_передачи']}"
@@ -183,7 +237,9 @@ class ReportService:
                 lines.append(f"    [{state}] {item}")
 
         lines.extend(["", "4. Плотность наблюдений по районам (сетка 5°×5°):"])
-        density = self.observation_density_by_region(start, end)
+        density = self.observation_density_by_region(
+            start, end, _obs_summary=obs_summary
+        )
         if not density:
             lines.append("  наблюдений за период нет")
         for cell, v in sorted(density.items()):

@@ -61,10 +61,11 @@ class BaseRepository(IRepository[T], Generic[T]):
         rows = self._db.query(f"SELECT * FROM {self.table}")
         return [self._row_to_entity(r) for r in rows]
 
-    def update(self, entity: T) -> None:
+    def update(self, entity: T, *, commit: bool = True) -> None:
         self._db.execute(
             self._update_sql(),
             self._entity_to_params(entity) + (entity.id,),  # type: ignore[attr-defined]
+            commit=commit,
         )
 
     def delete(self, entity_id: int) -> None:
@@ -197,14 +198,59 @@ class ObservationRepository(BaseRepository[Observation]):
         )
         return self._row_to_entity(rows[0]) if rows else None
 
-    def list_between(self, start: str, end: str):
-        """Наблюдения в заданном временном диапазоне (ISO-строки)."""
-        rows = self._db.query(
-            """SELECT * FROM observations
-               WHERE observation_time BETWEEN ? AND ?""",
-            (start, end),
-        )
+    def list_between(self, start: str, end: str, station_ids=None):
+        """Наблюдения в заданном временном диапазоне (ISO-строки).
+
+        station_ids — опциональный набор id станций (фильтр на стороне SQL).
+        """
+        if station_ids is not None:
+            ids = list(station_ids)
+            if not ids:
+                return []
+            placeholders = ",".join("?" * len(ids))
+            rows = self._db.query(
+                f"""SELECT * FROM observations
+                    WHERE observation_time BETWEEN ? AND ?
+                      AND station_id IN ({placeholders})""",
+                (start, end, *ids),
+            )
+        else:
+            rows = self._db.query(
+                """SELECT * FROM observations
+                   WHERE observation_time BETWEEN ? AND ?""",
+                (start, end),
+            )
         return [self._row_to_entity(r) for r in rows]
+
+    def list_summary(self, start: str = None, end: str = None):
+        """Лёгкая выборка для отчётов: без JSON parameters.
+
+        Возвращает список dict с полями id, station_id, observation_time,
+        kind, status, flagged — без разбора parameters.
+        """
+        sql = (
+            "SELECT id, station_id, observation_time, kind, status, flagged "
+            "FROM observations WHERE 1=1"
+        )
+        params: list = []
+        if start is not None:
+            sql += " AND observation_time >= ?"
+            params.append(start)
+        if end is not None:
+            sql += " AND observation_time <= ?"
+            params.append(end)
+        rows = self._db.query(sql, tuple(params))
+        return [
+            {
+                "id": r["id"],
+                "station_id": r["station_id"],
+                "observation_time": r["observation_time"],
+                "kind": r["kind"],
+                "status": r["status"],
+                "flagged": bool(r["flagged"]),
+            }
+            for r in rows
+        ]
 
 
 class TransmissionRepository(BaseRepository[Transmission]):
