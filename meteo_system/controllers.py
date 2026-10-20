@@ -90,9 +90,12 @@ class CenterController:
         )
 
     def self_register_station(self, user, code, name, latitude, longitude, type_):
-        """Саморегистрация станции (статус «ожидает подтверждения»)."""
-        # Доступно без роли менеджера — имитация автоматического подключения
-        self._require(user, Role.MANAGER, Role.OPERATOR, Role.OBSERVER)
+        """Саморегистрация станции (статус «ожидает подтверждения»).
+
+        Имитация первого подключения автоматической станции: доступно
+        только роли STATION (актёр «Автоматическая станция» в Use Case).
+        """
+        self._require(user, Role.STATION)
         return self.stations.register(
             code, name, latitude, longitude, type_, pending=True
         )
@@ -221,6 +224,7 @@ class MenuController:
     """Диалоговое меню: пользователь выбирает роль и действия."""
 
     USERS = {
+        Role.STATION: User(0, "Автоматическая станция", Role.STATION),
         Role.OBSERVER: User(1, "Наблюдатель", Role.OBSERVER),
         Role.OPERATOR: User(2, "Оператор центра", Role.OPERATOR),
         Role.MANAGER: User(3, "Руководитель", Role.MANAGER),
@@ -292,6 +296,10 @@ class MenuController:
                 ("Журнал аудита станций", self.show_audit_log),
                 registry,
             ]
+        if role == Role.STATION:
+            return [
+                ("Саморегистрация при первом подключении", self.self_register_station),
+            ]
         if role == Role.ANALYST:
             return [
                 ("Список наблюдений", self.show_observations),
@@ -303,7 +311,6 @@ class MenuController:
         # MANAGER
         return [
             ("Зарегистрировать станцию", self.register_station),
-            ("Саморегистрация станции (ожидает подтверждения)", self.self_register_station),
             ("Подтвердить станцию", self.confirm_station),
             ("Зарегистрировать прибор", self.register_device),
             ("Назначить прибор резервным", self.set_reserve_device),
