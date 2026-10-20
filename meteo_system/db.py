@@ -37,23 +37,12 @@ class Database:
             self._conn.close()
             self._conn = None
 
-    def execute(
-        self, sql: str, params: Tuple[Any, ...] = (), *, commit: bool = True
-    ) -> sqlite3.Cursor:
-        """Выполнить INSERT/UPDATE/DELETE. Возвращает курсор (для lastrowid).
-
-        commit=False — отложенная фиксация (пакетные обновления в одной транзакции).
-        """
+    def execute(self, sql: str, params: Tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        """Выполнить INSERT/UPDATE/DELETE. Возвращает курсор (для lastrowid)."""
         assert self._conn is not None, "Database не открыта (используйте with)"
         cur = self._conn.execute(sql, params)
-        if commit:
-            self._conn.commit()
+        self._conn.commit()  # данные не теряются, даже если программа аварийно завершится
         return cur
-
-    def commit(self) -> None:
-        """Явная фиксация транзакции (после серии execute(..., commit=False))."""
-        assert self._conn is not None, "Database не открыта (используйте with)"
-        self._conn.commit()
 
     def query(self, sql: str, params: Tuple[Any, ...] = ()) -> List[sqlite3.Row]:
         """Выполнить SELECT и вернуть список строк."""
@@ -127,19 +116,5 @@ class Database:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at)"
-        )
-        # Индексы для ускорения QC, поиска слота и отчётов (ЛР №5)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_obs_time ON observations(observation_time)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_obs_status ON observations(status)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_obs_station_time_kind "
-            "ON observations(station_id, observation_time, kind)"
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tx_time ON transmissions(transmission_time)"
         )
         self._conn.commit()
